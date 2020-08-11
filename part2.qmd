@@ -1,0 +1,262 @@
+---
+title: "GDS final essay part 2"
+format: html
+editor: visual
+---
+
+## Quarto
+
+Quarto enables you to weave together content and executable code into a finished document. To learn more about Quarto see <https://quarto.org>.
+
+## Running Code
+
+When you click the **Render** button a document will be generated that includes both content and the output of embedded code. You can embed code like this:
+
+```{r}
+
+
+# Retrieving ACS Data
+variables <- c("B05002_013E", "B05002_001E", "B15003_022","B15003_023E" , "B15003_024E","B15003_025E","B15003_001E","B19013_001E")
+base_acs_data <- get_acs(geography = "tract", variables = variables, state = "CA", 
+                        county = "San Francisco",
+                        survey = "acs5", year = 2020, geometry = TRUE , output = "wide")
+
+```
+
+```{r}
+base_acs_data <- bay_area_acs %>%
+                mutate(total_bachelors_or_higher = B15003_022E + B15003_023E + B15003_024E + B15003_025E,
+                       percentage_bachelors_or_higher = (total_bachelors_or_higher / B15003_001E) * 100,
+                       median_income = B19013_001E , percentage_foreign_born = (B05002_013E / B05002_001E) )
+
+```
+
+```{r}
+head(airbnb_with_zip)
+```
+
+```{r}
+base_airbnb <- airbnb_with_zip %>%
+  group_by(ZIP) %>%
+  dplyr :: summarise(listing_count = n() , average_price = mean(price, na.rm = TRUE)) %>%
+  st_drop_geometry()
+
+```
+
+```{r}
+sf_zips <- c(94101
+,94102
+,94103
+,94104
+,94105
+,94107
+,94108
+,94109
+,94110
+,94111
+,94112
+,94114
+,94115
+,94116
+,94117
+,94118
+,94119
+,94120
+,94121
+,94122
+,94123
+,94124
+,94125
+,94126
+,94127
+,94129
+,94130
+,94131
+,94132
+,94133
+,94134
+,94140
+,94141
+,94142
+,94146
+,94147
+,94157
+,94159
+,94164
+,94165
+,94166
+,94167
+,94168
+,94169
+,94170
+,94172,94188)
+```
+
+```{r}
+zcta_sf <- zcta %>% 
+  filter(ZIP %in% sf_zips)
+```
+
+```{r}
+
+head(base_acs_data)
+```
+
+```{r}
+crime_data <- read_csv("/Users/shahid/Projects/GDS Final essay/Police_Department_Incident_Reports__2018_to_Present_20240108.csv")
+```
+
+```{r}
+head(crime_data)
+```
+
+```{r}
+library(dplyr)
+
+crime_data <- crime_data %>% 
+  filter(!is.na(Point))
+
+```
+
+```{r}
+base_crime <- st_as_sf(crime_data, coords = c("Longitude", "Latitude"), crs = 4326)
+
+
+```
+
+```{r}
+
+zcta_sf <- st_transform(zcta_sf, 3310)
+base_crime <- st_transform(base_crime, 3310)
+
+
+```
+
+```{r}
+crime_data_with_zip <- st_join(base_crime, zcta_sf)
+
+```
+
+```{r}
+crimes_in_zip <- crime_data_with_zip %>% group_by(ZIP) %>%
+  dplyr :: summarise(crime_count = n()) %>%
+  st_drop_geometry() 
+```
+
+```{r}
+zcta_sf <- zcta_sf %>%
+  left_join(crimes_in_zip, by = "ZIP")
+```
+
+```{r}
+
+```
+
+```{r}
+zcta_sf<- zcta_sf %>%
+  left_join(base_airbnb, by = "ZIP")
+```
+
+```{r}
+base_acs_data <- st_transform(base_acs_data, 3310)
+```
+
+```{r}
+base_acs_data_with_zip <- st_join(base_acs_data, zcta_sf, join = st_intersects)
+
+```
+
+```{r}
+acs_zip_aggregated <- base_acs_data_with_zip %>%
+                      group_by(ZIP) %>%
+                      dplyr :: summarize(median_income = mean(median_income) , 
+                                per_bachelors_higher = mean (percentage_bachelors_or_higher),
+                                per_foreign_born = mean ( percentage_foreign_born))  %>%
+  st_drop_geometry()  
+```
+
+```{r}
+
+zcta_sf<- zcta_sf %>%
+  left_join(acs_zip_aggregated, by = "ZIP")
+```
+
+```{r}
+# Example: Imputing median income with median value
+zcta_sf$median_income <- ifelse(is.na(zcta_sf$median_income), median(zcta_sf$median_income, na.rm = TRUE), zcta_sf$median_income)
+
+```
+
+```{r}
+zcta_sf$listing_count <- ifelse(is.na(zcta_sf$listing_count), median(zcta_sf$listing_count, na.rm = TRUE), zcta_sf$listing_count)
+```
+
+```{r}
+zcta_sf$average_price <- ifelse(is.na(zcta_sf$average_price), median(zcta_sf$average_price, na.rm = TRUE), zcta_sf$average_price)
+```
+
+```{r}
+library(spdep)
+
+# Convert your sf object to a Spatial object for spdep
+zcta_sf_sp <- as(zcta_sf, "Spatial")
+
+# Define neighbors using queen contiguity (or use another method)
+neighbors <- poly2nb(zcta_sf_sp, queen = TRUE)
+
+# Convert neighbors to a listw object, which is needed for spatial autocorrelation tests
+listw <- nb2listw(neighbors, style = "W", zero.policy = TRUE)
+
+# Now you can proceed with Moran's I
+moran.test(zcta_sf$median_income, listw)
+
+
+```
+
+```{r}
+zcta_sf$median_income <- as.numeric(zcta_sf$median_income)
+zcta_sf$per_bachelors_higher <- as.numeric(zcta_sf$per_bachelors_higher)
+zcta_sf$crime_count <- as.numeric(zcta_sf$crime_count)
+zcta_sf$listing_count <- as.numeric(zcta_sf$listing_count)
+zcta_sf$per_foreign_born <- as.numeric(zcta_sf$per_foreign_born)
+```
+
+```{r}
+# Creating a new data frame for clustering
+clustering_data <- st_drop_geometry(zcta_sf[, c("median_income", "per_bachelors_higher", "crime_count", "listing_count", "average_price", "per_foreign_born"),drop=FALSE])
+
+
+```
+
+```{r}
+# Check for any non-numeric data
+sapply(clustering_data, function(x) any(!is.numeric(x)))
+
+
+```
+
+```{r}
+# Data normalization
+normalized_data <- scale(clustering_data)
+
+```
+
+```{r}
+set.seed(123)  # For reproducibility
+kmeans_result <- kmeans(normalized_data, centers = 4)  # Assuming 4 clusters for example
+
+```
+
+```{r}
+
+# Add cluster assignment to the original spatial data frame
+zcta_sf$cluster <- kmeans_result$cluster
+
+
+```
+
+```{r}
+# Visualize Clusters
+tm_shape(zcta_sf) +
+  tm_fill(col = "cluster", palette = "-Blues", border.col = "black")
+```
