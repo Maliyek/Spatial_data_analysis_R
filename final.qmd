@@ -1,0 +1,615 @@
+---
+title: "Computational Essay"
+author: "Fida Adam"
+toc: true
+format: 
+  html:
+    html-math-method: katex
+    code-tools: false
+    self-contained: true
+    embed-resources: true
+editor: visual
+execute: 
+  warning: false
+---
+
+```{r tidycensus, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(plyr)
+library(tidycensus)
+library(tidyverse)
+library(sf)
+library(viridis)
+library(dplyr)
+library(tmap)
+library(spdep)
+options(tigris_use_cache = TRUE)
+```
+
+```{r}
+readRenviron("~/.Renviron")
+```
+
+```{r}
+#  test retrieval
+test_data <- get_acs(
+    geography = "state",
+    variables = "B01003_001",  # Total population
+    state = "CA",
+    year = 2020,
+    survey = "acs5"
+)
+
+head(test_data)
+```
+
+The `echo: false` option disables the printing of code (only output is displayed).
+
+```{r}
+#Loading libraries
+library(readr)
+library(dplyr)
+library(ggplot2)
+
+```
+
+```{r}
+#Reading the csv files
+oak_data <- read_csv("/Users/shahid/Projects/GDS Final essay/Airbnb_bayarea_data/Oakland/listings.csv")
+sm_data <- read_csv("/Users/shahid/Projects/GDS Final essay/Airbnb_bayarea_data/San_mateo/listings.csv")
+sf_data<- read_csv("/Users/shahid/Projects/GDS Final essay/Airbnb_bayarea_data/San_fran/listings.csv")
+```
+
+```{r}
+#View the data 
+head(sf_data)
+head(sm_data)
+head(oak_data)
+```
+
+```{r}
+# Get a statistical summary
+summary(sf_data)
+```
+
+```{r}
+# Understanding structure
+str(sf_data)
+```
+
+Looks similar lets Combine data\
+
+```{r}
+# Combine the datasets
+combined_data <- rbind(sf_data, sm_data, oak_data)
+
+```
+
+```{r}
+#Check for duplicates
+duplicates <- duplicated(combined_data)
+
+# Print the duplicates
+combined_data[duplicates, ]
+```
+
+No duplicates
+
+```{r}
+colSums(is.na(combined_data))
+```
+
+Null columns are neighbourhood group , last review and review per month which are not relevant to our analysis
+
+IQR Method:Based on Quartiles: IQR is the range between the first quartile (25th percentile) and the third quartile (75th percentile). It measures the spread of the middle 50% of the data.Robust to Outliers: Unlike Z-score, IQR is less influenced by outliers because it's based on quartiles.Useful for Skewed Data: More effective than Z-score for skewed distributions or data that is not normally distributed.
+
+**Spatial Outlier or due to cluster , to be checked . Must do** . Cause it could just be that all outliers are focused in that region
+
+**Grouping by Neighbourhood**: This allows for a more nuanced analysis, recognizing that what's an outlier in one neighbourhood might be normal in another.
+
+-   **Statistical Method for Outliers**: The IQR method is robust and works well even with skewed distributions, which is common in pricing data.
+
+-   **Visual Analysis**: Bar plots or similar visualizations can help in understanding the distribution of outliers across different neighbourhoods, providing insights that might be missed in a purely numerical analysis.
+
+```{r}
+outlier_detection <- function(column) {
+  Q1 <- quantile(column, 0.25)
+  Q3 <- quantile(column, 0.75)
+  IQR <- Q3 - Q1
+  return(column < (Q1 - 1.5 * IQR) | column > (Q3 + 1.5 * IQR))
+}
+
+# Assuming 'price' is a column in your data
+combined_data$outlier <- outlier_detection(combined_data$price)
+
+# Step 3: Visualization of Outliers
+library(ggplot2)
+ggplot(combined_data, aes(x = longitude, y = latitude, color = outlier)) +
+  geom_point() +
+  theme_minimal()
+```
+
+.
+
+```{r}
+# Compute nearest neighbor distance
+# nn_dist <- spdep::nbdists(spdep::knn2nb(spdep::knearneigh(coordinates(combined_data))), coordinates(combined_data))
+
+# Calculate the mean and sd of nearest neighbor distances
+# mean_nn_dist <- mean(unlist(nn_dist), na.rm = TRUE)
+# sd_nn_dist <- sd(unlist(nn_dist), na.rm = TRUE)
+
+# Flag spatial outliers (e.g., those 3 SDs away from mean)
+# combined_data$outlier_spatial <- unlist(lapply(nn_dist, function(x) mean(x) > (mean_nn_dist + 3 * sd_nn_dist)))
+
+```
+
+```{r}
+# bay_area_data <- as.data.frame(combined_data)
+# bay_area_data$longitude <- coordinates(combined_data)[, 1]
+# bay_area_data$latitude <- coordinates(combined_data)[, 2]
+
+```
+
+```{r}
+clean_baydata <- combined_data[!combined_data$outlier, ]
+```
+
+```{r}
+# Load ggplot2 for visualization
+library(ggplot2)
+
+# Histogram of prices
+ggplot(clean_baydata, aes(x = price)) +
+  geom_histogram(bins = 30, fill = "blue", color = "black") +
+  theme_minimal() +
+  labs(title = "Distribution of Prices", x = "Price", y = "Count")
+
+# Scatter plot of latitude vs. longitude
+ggplot(clean_baydata, aes(x = longitude, y = latitude)) +
+  geom_point(aes(color = price), alpha = 0.5) +
+  theme_minimal() +
+  labs(title = "Geographical Distribution of Listings", x = "Longitude", y = "Latitude")
+
+```
+
+```{r}
+library(sf)
+library(dplyr)
+
+# Load ZCTA shapefile (replace with the actual path to your shapefile)
+zcta <- st_read("/Users/shahid/Projects/GDS Final essay/data/bayarea_zipcodes.shp")
+
+```
+
+```{r}
+# Load Airbnb data and convert to sf object
+airbnb_sf <- st_as_sf(clean_baydata, coords = c("longitude", "latitude"), crs = 4326)
+
+```
+
+```{r}
+# Transform CRS to California Albers for both datasets
+zcta <- st_transform(zcta, 3310)
+airbnb_sf <- st_transform(airbnb_sf, 3310)
+
+```
+
+```{r}
+# Spatial join Airbnb data with ZCTAs
+airbnb_with_zip <- st_join(airbnb_sf, zcta)
+
+```
+
+**Justification for CRS (EPSG:3310)**:
+
+-   **Accuracy**: Local projections like California Albers are designed to minimize distortions for the specific area, which is crucial for precise spatial analysis at the neighborhood level.
+
+-   **Relevance**: This CRS is tailored for California, making it ideal for analyses focused on the Bay Area.
+
+-   **Common Practice**: Using a local CRS is a standard approach in GIS for regional analyses to ensure the reliability of spatial operations and measurements.
+
+```{r}
+library(dplyr)
+
+summary_data <- airbnb_with_zip %>%
+  group_by(ZIP) %>%
+  dplyr :: summarise(
+    total_listings = n(),
+    avg_price = mean(price, na.rm = TRUE),
+    avg_minimum_nights = mean(minimum_nights, na.rm = TRUE),
+    avg_reviews = mean(number_of_reviews, na.rm = TRUE),
+    avg_host_listings = mean(calculated_host_listings_count, na.rm = TRUE),
+    availability_365_avg = mean(availability_365, na.rm = TRUE)
+  )
+
+# View the summarized data
+print(summary_data)
+```
+
+```{r}
+colSums(is.na(summary_data))
+```
+
+One NA ZIP - MUST CHECK
+
+```{r}
+zip_codes <- read_csv("/Users/shahid/Projects/GDS Final essay/data/Bayarea_zipcodes.csv")
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+# listing counts by ZIP
+listing_counts <- airbnb_with_zip %>%
+  group_by(ZIP) %>%
+  dplyr :: summarise(listing_count = n()) %>%
+  st_drop_geometry()
+
+
+
+```
+
+```{r}
+
+zcta_bay_area <- zcta %>% 
+  filter(ZIP %in% zip_codes$zip)
+
+# Join aggregated data back to ZCTA polygons
+zcta_listing_map <- zcta_bay_area %>%
+  left_join(listing_counts, by = "ZIP")
+
+```
+
+Convert ACS data to required CRS\
+
+```{r}
+# Create the choropleth map
+# Create the choropleth map
+ggplot(data = zcta_listing_map) +
+  geom_sf(aes(fill = listing_count), color = NA) +
+  scale_fill_viridis_c(option = "magma", direction = -1, 
+                       name = "Number of Listings") +
+  labs(title = "Number of Airbnb Listings per Zipcode in the Bay Area",
+       caption = "Data Source: Airbnb") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+```
+
+```{r}
+# price by ZIP
+average_price <- airbnb_with_zip %>%
+  group_by(ZIP) %>%
+  dplyr :: summarise(average_price = mean(price, na.rm = TRUE)) %>%
+  st_drop_geometry()
+```
+
+```{r}
+zcta_price_map <- zcta_bay_area %>%
+  left_join(average_price, by = "ZIP")
+```
+
+```{r}
+# Create the choropleth map
+ggplot(data = zcta_price_map) +
+  geom_sf(aes(fill = average_price), color = NA) +
+  scale_fill_viridis_c(option = "plasma", direction = -1, 
+                       name = "Average Price") +
+  labs(title = "Average Airbnb Price per Zipcode in the Bay Area",
+       caption = "Data Source: Airbnb") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+```{r}
+options(tigris_use_cache = TRUE)
+```
+
+```{r}
+view_vars <- load_variables(2020, "acs5", cache = TRUE)
+```
+
+```{r}
+view_vars
+```
+
+```{r}
+# Define the counties in the Bay Area
+bay_area_counties <- c("Alameda", "Contra Costa", "San Francisco", "San Mateo", "Santa Clara")
+
+# Retrieving ACS Data
+variables <- c("B06009_029E", "B06009_030E", "B06009_001E", "B19013_001E")
+bay_area_acs <- get_acs(geography = "tract", variables = variables, state = "CA", 
+                        county = bay_area_counties,
+                        survey = "acs5", year = 2020, geometry = TRUE , output = "wide")
+
+```
+
+```{r}
+# Check data distribution
+summary(bay_area_acs)
+```
+
+```{r}
+# Retrieving ACS Data for specified variables
+# variables <- c("B06009_029", "B06009_030", "B06009_001")
+# bay_area_acs <- get_acs(geography = "tract", variables = variables, state = "CA", 
+#                         county = bay_area_counties, 
+#                         survey = "acs5", year = 2020 , output = "wide" )
+
+
+```
+
+```{r}
+#foreign_born_pop_by_ed = B06009_006
+# pop_by_education = B15003_001 , by emp staus = B23006_013 , just place of birth = B05002_013
+```
+
+```{r}
+# Transforming and calculating percentages
+bay_area_acs_t <- bay_area_acs %>%
+                mutate(percentage_foreign_born = (B05002_013E / B05002_001E) * 100,
+                       median_income = B19013_001E)
+
+```
+
+```{r}
+# Basic exploration
+summary(bay_area_acs_t$percentage_bachelors_or_higher)
+summary(bay_area_acs_t$median_income)
+
+# Identifying outliers or anomalies
+ggplot(bay_area_acs_t, aes(x = percentage_bachelors_or_higher)) +
+  geom_histogram(bins = 30, fill = "blue", color = "black") +
+  theme_minimal() +
+  labs(title = "Distribution of Prices", x = "Price", y = "Count")
+
+ggplot(bay_area_acs_t, aes(x = B19013_001E)) + 
+    geom_histogram(binwidth = 1000, fill = "red") +
+    labs(title = "Distribution of Median Income in the Bay Area", x = "Median Income", y = "Count")
+
+
+
+```
+
+\
+
+```{r}
+# Map for percentage of foreign-born population with Bachelor's degree or higher
+ggplot(bay_area_acs_t) +
+  geom_sf(aes(fill = percentage_bachelors_or_higher), color = NA) +
+  scale_fill_viridis(name = "Percentage", option = "C", 
+                     breaks = c(0, 9.282, 14.286, 21.913, 72.231), 
+                     na.value = "grey") +
+  labs(title = "Foreign-Born Population with Bachelor's Degree or Higher (%)",
+       subtitle = "Bay Area Census Tracts") +
+  theme_minimal()
+
+# Map for median income
+ggplot(bay_area_acs_t) +
+  geom_sf(aes(fill = median_income), color = NA) +
+  scale_fill_viridis(name = "Median Income", option = "C",
+                     breaks = c(11205, 82004, 113333, 150730, 250001), 
+                     na.value = "grey") +
+  labs(title = "Median Income",
+       subtitle = "Bay Area Census Tracts") +
+  theme_minimal()
+
+```
+
+```{r}
+
+acs_data <- bay_area_acs_t %>% 
+  filter(!is.na(median_income), !is.na(percentage_bachelors_or_higher))
+
+
+correlation_analysis <- cor(acs_data$median_income, acs_data$percentage_bachelors_or_higher)
+print(correlation_analysis)
+```
+
+```{r}
+ggplot(data = bay_area_acs_t) +
+  geom_sf(aes(fill = percentage_bachelors_or_higher), color = NA) +
+  scale_fill_distiller(palette = "Spectral", direction = 1, name = "Bachelor's Degree (%)") +
+  labs(title = "Percentage of Foreign-Born Population with a Bachelor's Degree or Higher") +
+  theme_minimal()
+
+## Map for Median Income
+ggplot(data = bay_area_acs_t) +
+  geom_sf(aes(fill = median_income), color = NA) +
+  scale_fill_distiller(palette = "YlGnBu", direction = 1, name = "Median Income") +
+  labs(title = "Median Income in the Bay Area") +
+  theme_minimal()
+```
+
+```{r}
+glimpse(airbnb_with_zip)
+```
+
+```{r}
+glimpse(bay_area_acs_t)
+```
+
+```{r}
+# Ensure ACS data is in the same CRS as the ZCTA data
+acs_sf <- st_transform(bay_area_acs_t, st_crs(zcta))
+
+# Spatial join to assign each tract to a ZIP code
+acs_zip <- st_join(zcta_bay_area, acs_sf)
+
+```
+
+```{r}
+# Aggregate ACS data to ZIP code level
+acs_aggregated <- acs_zip %>%
+  group_by(ZIP) %>%
+  dplyr :: summarise(avg_socio_economic_variable = mean(median_income, na.rm = TRUE))
+
+```
+
+```{r}
+airbnb_with_zip <- airbnb_with_zip %>%
+  mutate(ln_price = log(price))
+
+```
+
+```{r}
+head(acs_aggregated)
+```
+
+```{r}
+# Merge Airbnb and aggregated ACS data
+joined_data <- st_join(airbnb_with_zip, acs_aggregated)
+
+```
+
+```{r}
+# Plotting the map
+ggplot() +
+  geom_sf(data = airbnb_with_zip, aes(geometry = geometry, color = ln_price)) + # Point plot for Airbnb
+  geom_sf(data = acs_aggregated, aes(fill = avg_socio_economic_variable), alpha = 0.5) + # Polygon plot for ZIP codes
+  scale_fill_viridis_c() +
+  labs(title = "Airbnb Prices and Socio-Economic Data in the Bay Area",
+       subtitle = "Point plot of ln(price) and polygon plot of socio-economic variable by ZIP code",
+       color = "ln(Price)",
+       fill = "Avg Socio-Economic Variable") +
+  theme_minimal()
+```
+
+```{r}
+ggplot()+
+  geom_sf(data = acs_aggregated, aes(fill = avg_socio_economic_variable), alpha = 0.6) + # Polygon plot for ZIP codes
+  geom_sf(data = airbnb_with_zip, aes(color = ln_price), size = 0.5, alpha = 0.3) + # Point plot for Airbnb
+  scale_fill_viridis_c(name = "Avg Income", option = "C") + 
+  scale_color_viridis_c(name = "Ln(Price)") +
+  labs(title = "Airbnb Prices and Socio-Economic Data in the Bay Area",
+       subtitle = "Point plot of ln(price) and polygon plot of socio-economic variable by ZIP code") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+```{r}
+
+# Create the map with tmap
+tm <- tm_shape(acs_aggregated) +
+  tm_polygons("avg_socio_economic_variable", palette = "-RdYlBu", border.col = "gray30", title = "Avg Socio-Economic Variable") +
+  tm_shape(airbnb_with_zip) +
+  tm_dots(col = "ln_price", size = 0.1, palette = "-Blues", title = "ln(Price)") +
+  tm_layout(main.title = "Airbnb Prices and Median income",
+            main.title.position = "center",
+            legend.position = c("left", "bottom"))
+
+# Print the map
+tm
+```
+
+```{r}
+colnames(joined_data)
+```
+
+```{r}
+joined_polygon_data <- st_join(zcta_price_map, acs_aggregated)
+
+```
+
+```{r}
+
+# For contiguity-based weights (Queen's case)
+weights_matrix <- spdep::poly2nb(joined_polygon_data, queen = TRUE)
+
+weights_list <- spdep::nb2listw(weights_matrix, style = "W", zero.policy = TRUE)
+
+
+```
+
+```{r}
+joined_polygon_data$average_price <- ifelse(is.na(joined_polygon_data$average_price), mean(joined_polygon_data$average_price, na.rm = TRUE), joined_polygon_data$average_price)
+```
+
+```{r}
+# Assuming 'avg_price' is the variable of interest
+morans_I <- spdep::moran.test(joined_polygon_data$average_price, weights_list, alternative = "greater")
+
+```
+
+```{r}
+
+# Create a histogram of 'average_price'
+ggplot(joined_polygon_data, aes(x = average_price)) +
+    geom_histogram(bins = 30, fill = "blue", color = "black") +
+    labs(title = "Distribution of Average Prices with Global Moran's I Index",
+         subtitle = paste("Moran's I: 0.550,",
+                          "Expectation: -0.003,",
+                          "Variance: 0.00017")) +
+    theme_minimal()
+
+```
+
+\
+
+```{r}
+print(morans_I)
+```
+
+```{r}
+joined_polygon_data$spatial_lag <- lag.listw(weights_list, joined_polygon_data$average_price)
+
+# Then, standardize the average_price variable
+joined_polygon_data$standardized_price <- scale(joined_polygon_data$average_price, center = TRUE, scale = TRUE)
+
+# Calculate standardized spatial lag
+joined_polygon_data$standardized_spatial_lag <- scale(joined_polygon_data$spatial_lag, center = TRUE, scale = TRUE)
+
+# Create the Moran plot
+ggplot(data = joined_polygon_data, aes(x = standardized_price, y = standardized_spatial_lag)) +
+  geom_point() +
+  geom_smooth(method = lm, se = FALSE, color = 'blue') +
+  theme_minimal() +
+  labs(title = "Moran's I Plot for Airbnb Prices",
+       x = "Standardized Price",
+       y = "Standardized Spatial Lag")
+
+```
+
+```{r}
+# Assuming 'avg_price' as the variable of interest
+library(spdep)
+
+# Calculate LISA (Local Moran's I)
+lisa <- spdep::localmoran(joined_polygon_data$average_price, weights_list)
+
+# Convert LISA results to a data frame for visualization
+lisa_df <- as.data.frame(lisa)
+joined_polygon_data$lisa_I <- lisa_df[,1]  # Local Moran's I values
+joined_polygon_data$lisa_pval <- lisa_df[,5]  # p-values
+
+```
+
+```{r}
+library(ggplot2)
+library(sf)
+
+
+# Map of Local Moran's I values
+ggplot(joined_polygon_data) +
+  geom_sf(aes(fill = lisa_I), color = NA) +
+  scale_fill_viridis_c() +
+  labs(title = "Local Moran's I for Airbnb Prices") +
+  theme_minimal()
+
+# Map of significant clusters (p-value < 0.05)
+ggplot(joined_polygon_data) +
+  geom_sf(aes(fill = lisa_pval < 0.05), color = NA) +
+  scale_fill_manual(values = c("TRUE" = "red", "FALSE" = "blue")) +
+  labs(title = "Significant Clusters in Airbnb Prices") +
+  theme_minimal()
+
+```
+
+```{r}
+```
