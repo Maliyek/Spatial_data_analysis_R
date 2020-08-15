@@ -1,0 +1,788 @@
+---
+title: "ENVS_563.3 Spatial data analysis on Bay Area"
+toc: true
+format: 
+  html:
+    html-math-method: katex
+    code-tools: false
+    self-contained: true
+    embed-resources: true
+editor: visual
+execute: 
+  warning: false
+---
+
+### Introduction
+
+The San Francisco Bay Area, renowned for its diverse culture, booming tech industry, and picturesque landscapes, has long been a region of interest for urban planners, economists, and social scientists.
+
+This analysis on the San Francisco Bay Area focuses on examining the spatial distribution and impact of Airbnb listings, set against the backdrop of various socio-economic factors such as income levels, education, immigration, and crime rates. This study will use data from Inside Airbnb and the American Community Survey, supplemented by crime and geographical data, to paint a comprehensive picture of the region. The goal is to provide insights into Bay Area using GIS methodologies and spatial data science tools.
+
+```{r include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(plyr)
+library(tidycensus)
+library(tidyverse)
+library(sf)
+library(viridis)
+library(dplyr)
+library(tmap)
+library(spdep)
+library(readr)
+library(ggplot2)
+library(leaflet)
+library(ggspatial)
+library(patchwork)
+library(classInt)
+library(gridExtra)
+options(tigris_use_cache = TRUE)
+```
+
+### **1.1 Collecting and importing the data**
+
+#### Sourcing the Data
+
+-   **Airbnb Data**:
+
+    Inside Airbnb website ( San Francisco, San Mateo, and Oakland ) data.
+
+-   **Socio-economic Variables**:
+
+    American Community Survey (ACS) 2016-2020, US Census Bureau
+
+**Additional Data sets** :
+
+-   **Source**: Berkeley Library for additional Bay Area geodata
+
+-   Convicted crimes dataset (2019-2020) reported by San Francisco Police
+
+-   Active business locations data set from Opendata SF.
+
+#### **1.1.1 Import and explore**
+
+```{r results='hide'}
+
+# Define directory path for Airbnb data
+airbnb_data_dir <- "~/Projects/GDS Final essay/Airbnb_bayarea_data"
+
+oak_data <- read_csv(file.path(airbnb_data_dir, "Oakland", "listings.csv"))# Read Oakland
+sm_data <- read_csv(file.path(airbnb_data_dir, "San_mateo", "listings.csv"))# Read San Mateo
+sf_data <- read_csv(file.path(airbnb_data_dir, "San_fran", "listings.csv"))# Read San Francisco
+
+# Define Bay Area counties
+bay_area_counties <- c("Alameda", "Contra Costa", "San Francisco", "San Mateo", "Santa Clara")
+
+# Define variables for ACS data 
+variables <- c("B05002_013E", "B05002_001E", "B19013_001E")
+
+# Retrieve ACS data for Bay Area
+bay_area_acs <- get_acs(geography = "tract", variables = variables, 
+                        state = "CA", county = bay_area_counties, survey = "acs5", 
+                        year = 2020,geometry = TRUE,output = "wide")
+
+
+```
+
+```{r results='hide'}
+# Read the list of Bay Area ZIP codes
+zip_codes <- read_csv("~/Projects/GDS Final essay/data/Bayarea_zipcodes.csv")
+
+```
+
+####  Exploration
+
+```{r results='hide'}
+# Combine Airbnb data from Oakland, San Mateo, and San Francisco
+airbnb_combined <- rbind(oak_data, sm_data, sf_data)
+
+# Checking for null values and summarizing the data
+airbnb_summary <- airbnb_combined %>% dplyr :: summarise_all(funs(sum(is.na(.))))
+print(airbnb_summary)
+
+
+# Exploring the structure and summary of the ACS data
+print(str(bay_area_acs))
+print(summary(bay_area_acs))
+
+```
+
+### **1.2 Preparing the Data**
+
+```{r}
+# Calculate Z-scores for the 'price' column
+airbnb_combined$price_z <- (airbnb_combined$price - mean(airbnb_combined$price, na.rm = TRUE)) / sd(airbnb_combined$price, na.rm = TRUE)
+
+# Filter out outliers based on Z-score (e.g., keeping data within 3 standard deviations)
+airbnb_combined <- airbnb_combined %>% 
+                   filter(abs(price_z) < 3)
+
+# Optionally, you can remove the 'price_z' column if it's no longer needed
+airbnb_combined <- select(airbnb_combined, -price_z)
+```
+
+The above removes the extreme outlier from the data using z score as this can skew our analysis .
+
+```{r results='hide' , fig.show='hide'}
+# Checking the distribution of prices
+ggplot(airbnb_combined, aes(x = price)) +
+  geom_histogram(bins = 30, fill = "blue", color = "black") +
+  theme_minimal() +
+  labs(title = "Distribution of Prices", x = "Price", y = "Count")
+
+```
+
+```{r results='hide'}
+# Load shapefile (replace with the actual path to your shapefile)
+shp_file <- st_read("~/Projects/GDS Final essay/data/bayarea_zipcodes.shp")
+
+```
+
+```{r echo=TRUE, results='hide'}
+# Load Airbnb data and convert to sf object
+airbnb_combined <- st_as_sf(airbnb_combined, coords = c("longitude", "latitude"), crs = 4326)
+
+```
+
+```{r results='hide'}
+st_crs(shp_file)
+```
+
+#### 1.2.1 Coordinate Reference System (CRS) Selection and Justification
+
+For our analysis of the San Francisco Bay Area, we will use the NAD83 / California zone 3 (ftUS) CRS. This choice is based on a few important reasons: [Reference link : EPSG \[5\]](https://epsg.io/2227)This CRS is designed specifically for California, making it more accurate for our Bay Area study and ensures data consistency.
+
+```{r results='hide'}
+
+# Transforming the CRS of bay_area_acs and airbnb data to match the shapefile CRS
+bay_area_acs <- st_transform(bay_area_acs, st_crs(shp_file))
+airbnb_combined <- st_transform(airbnb_combined , st_crs(shp_file))
+
+# Verifying the CRS transformation
+print(st_crs(airbnb_combined))
+
+```
+
+### **1.3 Discussion of the Data**
+
+**Airbnb Dataset**
+
+The Airbnb dataset, sourced from Inside Airbnb, offers a comprehensive look at the short-term rental landscape in the San Francisco Bay Area. Key variables of interest in this dataset include the listing price, location etc.
+
+```{r results='hide'}
+# Visualize the first few rows of the dataset
+head(airbnb_combined)
+```
+
+```{r results='hide'}
+colnames(airbnb_combined)
+```
+
+**American Community Survey (ACS) Data**:
+
+Provided by the US Census Bureau, this dataset offers valuable information about the people living in the Bay Area, like how many are immigrants and the average income of households.
+
+```{r results='hide'}
+# Visualize the first few rows of the dataset
+head(bay_area_acs)
+```
+
+**Combining Data for Geospatial Analysis**: We've integrated both datasets with geo-data from Berkeley library.
+
+**Police Department Incident Reports: 2018 to Present**: This dataset from the San Francisco Open Data Portal contains detailed incident reports filed by the San Francisco Police Department , a subset of 2019-2020 is taken for the analysis.
+
+**Active Business Locations**: This dataset provides comprehensive information on active business locations registered in San Francisco.
+
+### 1.4 Mapping and Data Visualisation
+
+**1.4.1 Airbnb in the BAY AREA at Neighbourhood Level**
+
+```{r results='hide'}
+# both datasets are in the same CRS 
+airbnb_with_zip <- st_join(airbnb_combined, shp_file)
+
+# Summarizing the Airbnb data by ZIP code
+summary_data_abnb <- airbnb_with_zip %>%
+  group_by(ZIP) %>%
+  dplyr :: summarise(
+    total_listings = n(),  # Count of listings per ZIP code
+    avg_price = mean(price, na.rm = TRUE),  # Average price of listings
+    avg_minimum_nights = mean(minimum_nights, na.rm = TRUE),  # Average minimum stay
+    avg_reviews = mean(number_of_reviews, na.rm = TRUE),  # Average number of reviews
+    avg_host_listings = mean(calculated_host_listings_count, na.rm = TRUE),  # Average listings per host
+    availability_365_avg = mean(availability_365, na.rm = TRUE)  # Average availability across the year
+  )
+
+# Display the summarized data
+print(summary_data_abnb)
+```
+
+\
+Looking at Inside Airbnb data, a point vector data, is a traditional yet updated form of spatial data due to GPS and user-generated content. Unlike Airbnb's specific location points, new forms of data like vector , raster , gepackage are more versatile including 3D models and complex relationships.
+
+```{r}
+summary_data_abnb<- as.data.frame(summary_data_abnb)
+
+# Join the summary data with ZIP code geometries
+airbnb_summary_zip <- shp_file %>%
+  left_join(summary_data_abnb, by = "ZIP")
+```
+
+```{r}
+#Filtering for relevant zip codes
+airbnb_summary_zip<- airbnb_summary_zip%>% filter(ZIP %in% zip_codes$zip)
+```
+
+```{r results='hide'}
+summary(airbnb_summary_zip$avg_price)
+```
+
+**Justification for Data Classification Methods and Visualization Choices**
+
+For our analysis of Airbnb listings and prices in the Bay Area, we've used quantile classification and manual breaks respectively. This method divides the data into classes with an equal number of listings, which helps in presenting a balanced view of the distribution.
+
+The equal-interval classification was avoided as it doesn't suit our skewed data, potentially misrepresenting the majority of data points.
+
+##### **Map 1**
+
+```{r}
+# Set the thematic map layout to static
+tmap_mode("plot")
+
+# Map 1: Number of Listings
+map1 <- tm_shape(airbnb_summary_zip) +
+          tm_polygons("total_listings",
+                      title = "Number of listings",
+                      palette = "Reds",
+                      style = "quantile",
+                      breaks = c(1, 107, 192, 262, 1035),
+                      border.col = "transparent") +
+          tm_layout(main.title = "Number of Listings per Zipcode",
+                    main.title.position = "center",
+                    main.title.size = 1,
+                    legend.position = c("left", "bottom"),
+                    legend.text.size = 0.6,
+                    legend.title.size = 0.7) +
+          tm_compass(type = "arrow", position = c("right", "top"))
+
+# Map 2: Average Price
+map2 <- tm_shape(airbnb_summary_zip) +
+          tm_polygons("avg_price",
+                      title = "Average Price",
+                      palette = "Blues",
+                      #style = "quantile",
+                      breaks = c(0,150,200,250,300,1500),
+                      border.col = "transparent") +
+          tm_layout(main.title = "Average Price per Zipcode",
+                    main.title.position = "center",
+                    main.title.size = 1,
+                    legend.position = c("left", "bottom"),
+                    legend.text.size = 0.6,
+                    legend.title.size = 0.7) +
+          tm_compass(type = "arrow", position = c("left", "top"))
+
+# Combine the two maps
+combined_map <- tmap_arrange(map1, map2)
+
+# Print the combined map
+print(combined_map)
+
+```
+
+The choropleth maps reveal key insights into Airbnb listings in the Bay Area. The first map shows dense Airbnb listings in areas, likely popular with tourists or having lenient rental regulations, as indicated by darker reds. The second map displays average prices per zipcode, with deeper blues signifying higher costs. There's an apparent negative correlation between listing density and price; affluent neighborhoods, high demand-supply ratios, and tourist hotspots tend to have higher prices. Despite some areas having many listings, their prices remain comparatively lower. However, in coastal regions and the southern area near Silicon Valley, high prices coincide with moderate listing numbers, reflecting these regions' attractiveness and affluence.
+
+In terms of opportunities and limitations, these maps provide crucial insights for urban planning and policy, particularly in understanding short-term rentals' impact on housing and local economies. However, the dataset's focus on short-term rentals limits its representation to only a portion of the housing market, overlooking long-term and non-Airbnb accommodations.
+
+### 1.4.2. Socio-economic variables from the ACS data
+
+For our spatial analysis, we've selected two key variables: the percentage of the foreign-born population and median income. These were chosen to examine the demographic composition and economic status of the Bay Area's census tracts.
+
+```{r results='hide' ,fig.show='hide'}
+# ----------------------------------------------
+# Data Preparation for Mapping
+# ----------------------------------------------
+bay_area_acs_t <- bay_area_acs %>%
+  # Calculate the percentage of foreign-born residents
+  mutate(
+    percentage_foreign_born = (B05002_013E / B05002_001E) * 100,
+    # Extract median income as is
+    median_income = B19013_001E
+  ) %>%
+  st_as_sf() # Ensure the data is in sf format for spatial operations
+
+# ----------------------------------------------
+# Handling Missing Values
+# ----------------------------------------------
+median_income_median <- median(bay_area_acs_t$median_income, na.rm = TRUE)
+bay_area_acs_t$median_income[is.na(bay_area_acs_t$median_income)] <- median_income_median
+percentage_foreign_born_mean <- mean(bay_area_acs_t$percentage_foreign_born, na.rm = TRUE)
+bay_area_acs_t$percentage_foreign_born[is.na(bay_area_acs_t$percentage_foreign_born)] <- percentage_foreign_born_mean
+
+# Print summaries of the computed fields for a sanity check
+summary(bay_area_acs_t$percentage_foreign_born)
+summary(bay_area_acs_t$median_income)
+
+# ----------------------------------------------
+# Identifying Outliers or Anomalies
+# ----------------------------------------------
+
+# Plot the distribution of percentage_foreign_born
+ggplot(bay_area_acs_t, aes(x = percentage_foreign_born)) +
+  geom_histogram(bins = 30, fill = "blue", color = "black") +
+  theme_minimal() +
+  labs(title = "Distribution of Foreign-born Residents", x = "Percentage Foreign Born", y = "Count")
+```
+
+```{r results='hide'}
+# Create breaks based on quantiles 
+breaks_foreign_born <- classIntervals(bay_area_acs_t$percentage_foreign_born, n = 5, style = "quantile")$brks
+
+breaks_median_income <- classIntervals(bay_area_acs_t$median_income, n = 5, style = "quantile")$brks
+
+```
+
+##### Map 2
+
+```{r fig.width=14, fig.height=8}
+
+# Map for percentage of foreign-born population
+map1 <- ggplot(bay_area_acs_t) +
+  geom_sf(aes(fill = percentage_foreign_born), color = NA) +
+  scale_fill_gradient2(name = "Percentage",
+                       low ="beige", mid = "red", high="black",
+                       midpoint = 50,  # Adjust the midpoint as needed
+                       breaks = c(0, 10, 20, 30, 40, 100),
+                       na.value = "grey") +
+  labs(title = "Map 1: Foreign-Born Population (%)", 
+       subtitle = "Bay Area Census Tracts",
+       caption = "\nMap 1: This map shows the percentage of the foreign-born population across different census tracts in the Bay Area.") +
+  theme_void() +
+  annotation_north_arrow(location = "bl", which_north = "true", 
+                         height = unit(0.3, "cm"), width = unit(0.2, "cm"))
+
+# Di
+
+# Map for median income
+map2 <- ggplot(bay_area_acs_t) +
+  geom_sf(aes(fill = median_income), color = NA) +
+  scale_fill_viridis(name = "Median Income", option = "C", breaks = c(0,100000,150000,200000,250001), na.value = "grey") +
+  labs(title = "Map 2 : Median Income", subtitle = "Bay Area Census Tracts",
+       caption = "\n Map 2 represents socio economic varibales across different census tracts in the Bay Area") +
+  theme_void() +
+  annotation_north_arrow(location = "bl", which_north = "true", 
+                         #pad_x = unit(0.1, "in"), pad_y = unit(0.1, "in"),
+                         height = unit(0.3, "cm"), width = unit(0.2, "cm"))
+
+# Combine the two maps
+combined_map <- grid.arrange(map1, map2, ncol = 2)
+
+```
+
+Analyzing Bay Area choropleth maps reveals neighborhood typologies based on socio-economic variables like foreign-born population percentages and median income.
+
+1.  **Affluent Neighborhoods**: High median incomes (Map 2) and lower diversity (Map 1) suggest wealthy, established communities
+
+2.  **Culturally Diverse Neighborhoods**: High foreign-born populations (Map 1) with varying but generally high incomes point to areas rich in cultural diversity and economic vibrancy.
+
+3.  **Mixed-Income, High Diversity Neighborhoods**: Regions like these indicate neighborhoods undergoing changes like gentrification or traditional immigrant areas.
+
+4.  **Low Income, Low Diversity Neighborhoods**: Certain areas show low foreign-born populations and comparatively lower income levels.
+
+The economic status of neighborhoods is gauged by median income, reflecting service availability and quality of life. Cultural composition, determined by the percentage of foreign-born residents, influences local culture and community activities. These combined with geographic context are the describing characteristics.
+
+The spatial distribution analysis reveals concentrated wealth around economic centers and suburbs, and cultural enclaves marked by foreign-born populations, likely shaped by migration trends and community networks. Silicon Valley displays tech-driven affluence, with neighborhoods having diverse, foreign-born populations and high median incomes.
+
+**Hypothesis on Airbnb Clustering:**
+
+The analysis suggests that neighborhoods that combine economic affluence with cultural richness are prime areas for Airbnb clustering. These areas provide both the supply (via homeowners seeking extra income) and the demand (from tourists drawn to the area's attractions). The presence of diverse populations in diverse neighborhoods may also contribute to a higher availability of short-term rentals.
+
+### 1.4.3. Combining Data sets
+
+We merged socio-economic data from census tracts with zip code shapefiles via spatial join, mapping tract data to corresponding zip codes.
+
+```{r results='hide'}
+# Join the socio-economic data to the ZIP code boundaries
+bay_area_acs_zip<- st_join(shp_file, bay_area_acs_t, join = st_intersects)
+```
+
+```{r}
+# Aggregate the socio-economic data by ZIP code
+acs_aggregated_zip <- bay_area_acs_zip %>%
+  group_by(ZIP) %>%
+  dplyr :: summarise(avg_socio_economic_variable = mean(median_income, na.rm = TRUE)) %>% st_drop_geometry()
+
+```
+
+```{r}
+# Calculate the natural logarithm of price to normalize the data distribution
+airbnb_with_zip <- airbnb_with_zip %>%
+  mutate(ln_price = log(price))
+
+```
+
+```{r}
+# Filter the datasets to include only the ZIP codes in the Bay Area
+acs_aggregated_zip<- acs_aggregated_zip  %>%  filter(ZIP %in% zip_codes$zip)
+airbnb_summary_zip<- airbnb_summary_zip   %>% filter(ZIP %in% zip_codes$zip)
+```
+
+```{r}
+acs_aggregated_zip <- shp_file%>% left_join(acs_aggregated_zip, by = "ZIP") %>%  filter(ZIP %in% zip_codes$zip)
+```
+
+##### Map 3
+
+```{r fig.width=12, fig.height=10}
+
+# Define manual breaks for the color scale of the socio-economic variable
+income_breaks <- c(min(acs_aggregated_zip$avg_socio_economic_variable, na.rm = TRUE),
+                   quantile(acs_aggregated_zip$avg_socio_economic_variable, probs = seq(0, 1, by = 0.25), na.rm = TRUE),
+                   max(acs_aggregated_zip$avg_socio_economic_variable, na.rm = TRUE))
+
+# Switch to static plotting mode
+tmap_mode("plot")
+
+# Create the map with tmap
+tm <- tm_shape(acs_aggregated_zip) +
+  tm_polygons("avg_socio_economic_variable", 
+              breaks = income_breaks,
+              palette = "-RdYlBu", 
+              border.col = "gray30", 
+              title = "Avg Median Income") +
+  tm_shape(airbnb_with_zip) +
+  tm_compass(type = "arrow", position = c("left", "top"))+
+  tm_dots(col = "ln_price", 
+          size = 0.1, 
+          palette = "Blues", 
+          title = "ln(Price) of Airbnb",
+          shape = 21, 
+          border.col = "black", 
+          border.lwd = 0.5) + # added border for better visibility
+  tm_layout(main.title = "Airbnb Prices and Median Income by Zip Code",
+            main.title.position = "center",
+            legend.position = c("right", "center"),
+            frame = FALSE,
+            legend.text.size = 0.6,  # Increase legend text size
+            legend.title.size = 0.8, # Increase legend title size
+            outer.margins = 0.02)  +
+  tm_credits("This map visualizes the distribution of Airbnb with its price represented in log across the representation of median income by zip code , highlighting socio-economic factors influencing lodging prices.",
+             position = c("RIGHT", "BOTTOM"),
+             size = 0.5)
+# Print the map
+tm
+
+```
+
+The map, displaying the natural logarithm of Airbnb prices alongside median income by zip code, shows dense clusters of listings in tech hubs and tourist spots in the Bay Area, including parts of Silicon Valley. A correlation emerges between higher Airbnb prices and areas with higher median incomes, hinting at a link between property values and accommodation costs. Despite high prices in affluent areas, variability exists, indicating a mix of luxury and modest listings.
+
+The map's analysis shows Airbnb prices correlating with local economies: areas with a strong tech sector and higher median incomes tend to have more expensive listings. Lower-income areas with many Airbnbs may suggest a saturated market with competitive pricing.
+
+### 1.4.4. Autocorrelation
+
+The code uses Moran's I statistic, measuring spatial autocorrelation ranging from -1 (perfect dispersion) to +1 (perfect correlation).
+
+```{r results='hide'}
+# Removing the spatial component 
+acs_aggregated_zip <- acs_aggregated_zip %>% st_drop_geometry()
+
+# Joining the Airbnb data with the socio-economic data on ZIP code
+joined_polygon_data <- airbnb_summary_zip %>%
+  left_join(acs_aggregated_zip, by = "ZIP")
+
+head(joined_polygon_data)
+
+```
+
+```{r}
+# Creating a spatial weights matrix using the Queen's case definition of contiguity
+weights_matrix <- spdep::poly2nb(joined_polygon_data, queen = TRUE)
+# Converting the neighbors into a list of weights with standardization
+weights_list <- spdep::nb2listw(weights_matrix, style = "W", zero.policy = TRUE)
+```
+
+```{r}
+# Imputing missing values in 'avg_price' with the mean of the non-missing values
+joined_polygon_data$avg_price <- ifelse(is.na(joined_polygon_data$avg_price), mean(joined_polygon_data$avg_price, na.rm = TRUE), joined_polygon_data$avg_price)
+```
+
+```{r results='hide', fig.show='hide'}
+# Calculating Moran's I for 'avg_price' to test for spatial autocorrelation
+morans_I <- spdep::moran.test(joined_polygon_data$avg_socio_economic_variable, weights_list, alternative = "greater")
+# Create a histogram of 'avg_socio_economic_variable'
+ggplot(joined_polygon_data, aes(x = avg_price)) +
+    geom_histogram(bins = 30, fill = "blue", color = "black") +
+    labs(title = "Distribution of Average Prices with Global Moran's I Index",
+         subtitle = paste("Moran's I: 0.550,",
+                          "Expectation: -0.003,",
+                          "Variance: 0.00017")) +
+    theme_minimal()
+```
+
+```{r}
+# Printing the Moran's I test results
+print(morans_I)
+```
+
+```{r}
+joined_polygon_data$spatial_lag <- lag.listw(weights_list, joined_polygon_data$avg_socio_economic_variable)
+
+# Then, standardize the average_price variable
+joined_polygon_data$standardized_price <- scale(joined_polygon_data$avg_socio_economic_variable, center = TRUE, scale = TRUE)
+
+# Calculate standardized spatial lag
+joined_polygon_data$standardized_spatial_lag <- scale(joined_polygon_data$spatial_lag, center = TRUE, scale = TRUE)
+
+# Create the Moran plot
+ggplot(data = joined_polygon_data, aes(x = standardized_price, y = standardized_spatial_lag)) +
+  geom_point() +
+  geom_smooth(method = lm, se = FALSE, color = 'blue') +
+  theme_minimal() +
+  labs(title = "Moran's I Plot for Airbnb Prices",
+       x = "Standardized Price",
+       y = "Standardized Spatial Lag")
+```
+
+Our analysis using Moran's I test for median income across Bay Area zip codes reveals significant spatial autocorrelation. The test yielded a standard deviate of 6.1028 and a p-value of about 0.00000005212, suggesting a strong likelihood that wealth or poverty clusters in specific areas rather than being randomly distributed. This finding has crucial implications for regional housing policy and economic development.\
+\
+Local Indicators of Spatial Association (LISA), on the other hand, provides a way to identify the type of spatial correlation at a more granular level.
+
+```{r}
+# Calculate LISA (Local Moran's I)
+lisa <- spdep::localmoran(joined_polygon_data$avg_socio_economic_variable, weights_list)
+
+# Convert LISA results to a data frame for visualization
+lisa_df <- as.data.frame(lisa)
+joined_polygon_data$lisa_I <- lisa_df[,1]  # Local Moran's I values
+joined_polygon_data$lisa_pval <- lisa_df[,5]  # p-values
+
+```
+
+##### Map 4
+
+```{r fig.width=12, fig.height=8}
+ #Map of Local Moran's I values
+map1 <- ggplot(joined_polygon_data) +
+  geom_sf(aes(fill = lisa_I), color = NA) +
+  scale_fill_viridis_c() +
+  labs(title = "Local Moran's I for Median Income") +
+  theme_void()
+
+# Map of significant clusters (p-value < 0.05)
+map2 <- ggplot(joined_polygon_data) +
+  geom_sf(aes(fill = lisa_pval < 0.05), color = NA) +
+  scale_fill_manual(values = c("TRUE" = "red", "FALSE" = "blue")) +
+  labs(title = "Significant Clusters in Median Income") +
+  theme_void()
+
+# Combine the two maps with adjusted spacing
+combined_map <- grid.arrange(map1, map2, ncol = 2)
+
+```
+
+From these maps, we can observe that there are distinct pockets of wealth, likely correlating with high-income neighborhoods, which are significantly clustered as shown in red. Conversely, the absence of significant clustering in other areas suggests a more heterogeneous distribution of income levels.\
+
+### 2. **Further analysis of Bay Area**
+
+**Data Retrieval and Integration**
+
+There are 4 sets of data collected and combined . Along with Airbnb data and ACS data on the San Francisco county , integrating crime data as well as active business locations data from Opendata SF . [Opendata from data.sfgov.org](https://data.sfgov.org/browse?category=Public+Safety) \[3\]
+
+```{r include=FALSE}
+#relevant zip codes obtained from Opendata platform
+sf_zips <- c(94101,94102,94103,94104,94105,94107,94108,94109,94110,94111,94112,94114,94115,94116,94117,94118,94119,94120,94121,94122,94123,94124,94125,94126,94127,94129,94130,94131,94132,94133,94134,94140,94141,94142,94146,94147,94157,94159,94164,94165,94166,94167,94168,94169,94170,94172,94188)
+```
+
+```{r}
+#importing active_business_locations data
+active_business_locations <- read_csv("~/Projects/GDS Final essay/Active_Business_Locations.csv")
+```
+
+```{r}
+# Extracting the zip code and renaming the column
+active_business_locations$ZIP <- sub("^(\\d{5}).*", "\\1", active_business_locations$`Source Zipcode`)
+# Get the count of business locations by zip
+business_location_data <- active_business_locations %>%
+  group_by(ZIP) %>%
+  dplyr :: summarize(business_count = n())
+```
+
+```{r results='hide'}
+#import crime dataset
+crime_data <- read_csv("~/Projects/GDS Final essay/Police_Department_Incident_Reports__2018_to_Present_20240108.csv")
+```
+
+```{r results='hide'}
+# Retrieving ACS Data for foreign population , Educational attainment , poverty ,median income for San fransisco
+variables <- c("B05002_013E", "B05002_001E", "B15003_022E","B15003_023E" , "B15003_024E","B15003_025E","B15003_001E","B19013_001E","B17001_002E","B17001_001E")
+base_acs_data <- get_acs(geography = "tract", variables = variables, state = "CA", 
+                        county = 'San Francisco',
+                        survey = "acs5", year = 2020, geometry = TRUE , output = "wide")
+```
+
+```{r}
+#transforming and standardising the acs data
+base_acs_data <- base_acs_data %>%
+                mutate(total_bachelors_or_higher = B15003_022E + B15003_023E + B15003_024E + B15003_025E,
+                       percentage_bachelors_or_higher = (total_bachelors_or_higher / B15003_001E) * 100,
+                       median_income = B19013_001E , percentage_foreign_born = (B05002_013E / B05002_001E),
+                       percentage_poverty = B17001_002E / B17001_001E)
+```
+
+```{r results='hide'}
+#clean crime data and transform
+head(crime_data)
+crime_data <- crime_data %>%  #Remove incidents with no spatial data 
+  filter(!is.na(Point))
+base_crime <- st_as_sf(crime_data, coords = c("Longitude", "Latitude"), crs = 4326) #convert to sf
+
+
+```
+
+```{r}
+#changing it from point data to zip level data 
+base_crime <- st_transform(base_crime, st_crs(shp_file))
+crime_data_with_zip <- st_join(base_crime, shp_file)
+crimes_in_zip <- crime_data_with_zip %>% group_by(ZIP) %>%
+  dplyr :: summarise(crime_count = n()) %>%
+  st_drop_geometry() 
+
+```
+
+```{r}
+#transform acs data
+base_acs_data <- st_transform(base_acs_data, st_crs(shp_file))
+```
+
+```{r}
+#aggregate acs to zip level
+base_acs_data_with_zip <- st_join(base_acs_data, shp_file, join = st_intersects)
+acs_zip_aggregated <- base_acs_data_with_zip %>%
+                      group_by(ZIP) %>%
+                      dplyr :: summarize(median_income = mean(median_income) , 
+                                per_bachelors_higher = mean (percentage_bachelors_or_higher),
+                                per_foreign_born = mean ( percentage_foreign_born) ,
+                                per_poverty = mean(percentage_poverty))  %>%
+  st_drop_geometry() 
+```
+
+```{r}
+#filtering out required zip
+shp_file_sf <- shp_file %>% filter(ZIP %in% sf_zips)
+```
+
+```{r}
+airbnb_summary_zip <- airbnb_summary_zip %>% st_drop_geometry()
+```
+
+```{r}
+#consolidating all the features
+consolidated_data <- shp_file_sf  %>% left_join(acs_zip_aggregated, by = "ZIP")
+consolidated_data <- consolidated_data  %>% left_join(crimes_in_zip, by = "ZIP")
+consolidated_data <- consolidated_data  %>% left_join(airbnb_summary_zip, by = "ZIP")
+consolidated_data <- consolidated_data %>% left_join(business_location_data,by="ZIP")
+```
+
+```{r}
+consolidated_data$median_income <- ifelse(is.na(consolidated_data$median_income), median(consolidated_data$median_income, na.rm = TRUE), consolidated_data$median_income)
+
+```
+
+```{r}
+consolidated_data[is.na(consolidated_data)] <- 0
+```
+
+Consolidated all the data after aggregation at ZIP code level to a single dataframe.
+
+```{r}
+# Creating a new data frame for clustering
+clustering_data <- st_drop_geometry(consolidated_data[, c("median_income", "per_bachelors_higher", "crime_count", "total_listings", "avg_price", "per_foreign_born","per_poverty","business_count"),drop=FALSE])
+
+
+```
+
+```{r results='hide'}
+# Check for any non-numeric data
+sapply(clustering_data, function(x) any(!is.numeric(x)))
+```
+
+Applies k-means clustering to the normalized dataset to identify distinct neighborhood groups based on the selected variables.
+
+```{r}
+# Data normalization
+normalized_data <- scale(clustering_data)
+set.seed(123)  # For reproducibility
+kmeans_result <- kmeans(normalized_data, centers = 6)
+# Add cluster assignment to the original spatial data frame
+consolidated_data$cluster <- as.factor(kmeans_result$cluster)
+
+```
+
+```{r}
+tmap_mode("view")
+
+tm_shape(consolidated_data) +
+  tm_polygons("cluster", palette = "Set3", title = "Cluster", alpha = 0.7) + # Set alpha for transparency
+  tm_layout(legend.position = c("left", "bottom"))
+```
+
+```{r results='hide'}
+# Summarizing the data by cluster to profile each cluster
+cluster_profiles <- consolidated_data %>%
+  group_by(cluster) %>%
+  dplyr :: summarise(
+    avg_median_income = mean(median_income, na.rm = TRUE),
+    avg_percentage_bachelors_or_higher = mean(per_bachelors_higher, na.rm = TRUE),
+    avg_percentage_foreign_born = mean(per_foreign_born, na.rm = TRUE),
+    avg_crime_count = mean(crime_count, na.rm = TRUE),
+    avg_airbnb_listings = mean(total_listings, na.rm = TRUE),
+    avg_airbnb_price = mean(avg_price, na.rm = TRUE),
+    avg_business_count = mean(business_count,na.rm = TRUE),
+    avg_poverty = mean(per_poverty , na.rm = TRUE),
+    .groups = 'drop'  
+  )
+print(cluster_profiles)
+```
+
+**Cluster Analysis**
+
+Looking at the map and the cluster profiles , here's how we can describe these clusters as
+
+-   **Cluster 1**: Higher income, high education, moderate foreign-born population, lower crime rates, high Airbnb listings and business count, low poverty rates.
+
+-   **Cluster 2**: High income, high education, the least foreign-born population, very high crime rates, highest Airbnb listings and business count, moderate poverty rates.
+
+-   **Cluster 3**: Moderate income, moderate education, higher foreign-born population, highest crime rates, moderate Airbnb listings and business count, higher poverty rates.
+
+-   **Cluster 4**: Very high income, highest education, least foreign-born population, lowest crime rates, moderate Airbnb listings and low business count, very low poverty rates.
+
+-   **Cluster 5**: Moderate income, lower education, highest foreign-born population, low crime rates, low Airbnb listings and business count, higher poverty rates.
+
+-   **Cluster 6**: Lower income, lower education, higher foreign-born population, moderate crime rates, moderate Airbnb listings and business count, higher poverty rates.
+
+The key features looked at are Income and Education Levels , Percentage of Foreign-Born Residents, Crime Rates, Airbnb Listings, Active businesses and Poverty rates.\
+This type of analysis can be used to identify neighbourhoods in need, for example
+
+-   **Economic Development**: Clusters 5 and 6, characterized by lower incomes and education, would benefit from job training and educational opportunities.
+
+-   **Affordable Housing**: In Clusters 1 and 2, where Airbnb listings are high, affordable housing initiatives could prevent long-term resident displacement.
+
+### Conclusion
+
+In conclusion, our spatial analysis reveals a complex mosaic of economic and cultural patterns. The spatial autocorrelation indicated that both affluence and poverty are geographically clustered rather than dispersed randomly in the Bay area.
+
+The foreign-born population distribution suggests the existence of cultural enclaves, potentially due to historical migration patterns, the clustering of community support networks or a thriving economic hub which attracts talent. Additionally, the clustering of Airbnb listings in culturally diverse and economically affluent areas suggests a thriving short-term rental market, driven by the allure of Silicon Valley , tourist attractions and the broader Bay Area's cultural and economic opportunities.
+
+Our findings underscore the importance of considering spatial data and socio-economic variables to unravel the complexities of urban environments and address the challenges of modern cities.
+
+### References
+
+[US Census Bureau ACS Data](https://www.census.gov/data/developers/data-sets/acs-5year.html)
+
+<http://insideairbnb.com/>
+
+[Berkeley Library Geodata](https://geodata.lib.berkeley.edu/catalog/ark28722-s7888q)
+
+[Opendata from data.sfgov.org](https://data.sfgov.org/browse?category=Public+Safety)
+
+[Impact of Airbnb listings \[6\]](https://pubsonline.informs.org/doi/abs/10.1287/mksc.2020.1227)
+
+[San francisco demographics study](https://www.realdatasf.com/san-francisco-demographics-by-zip-code/)
